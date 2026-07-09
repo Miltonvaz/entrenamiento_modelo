@@ -42,12 +42,10 @@ func (h *OtaHandler) EnsureUploadDirs() error {
 	// Automatically download a tiny valid ONNX model if base_model.onnx is missing
 	baseModelPath := filepath.Join(modelDir, "base_model.onnx")
 	if _, err := os.Stat(baseModelPath); os.IsNotExist(err) {
-		log.Println("[OTA] base_model.onnx not found. Downloading a tiny valid ONNX model automatically...")
+		log.Println("[OTA] base_model.onnx not found. Downloading the base Zipformer encoder.onnx model from Hugging Face...")
+		modelURL := "https://huggingface.co/csukuangfj/sherpa-onnx-zipformer-es-2023-06-15/resolve/main/encoder.onnx"
 		
-		// Tiny MNIST ONNX model (approx. 78 KB)
-		const modelURL = "https://github.com/onnx/models/raw/main/validated/vision/classification/mnist/model/mnist-8.onnx"
-		
-		client := &http.Client{Timeout: 30 * time.Second}
+		client := &http.Client{Timeout: 10 * time.Minute}
 		resp, err := client.Get(modelURL)
 		if err != nil {
 			log.Printf("[OTA] Warning: failed to download base model: %v. Fallback placeholder will be used.", err)
