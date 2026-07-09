@@ -114,8 +114,33 @@ func (h *OtaHandler) UploadVoiceSample(w http.ResponseWriter, r *http.Request) {
 		courseID = &cID
 	}
 
-	// Create voice profile in DB if not exists
 	ctx := r.Context()
+
+	// Ensure the teacher user exists in PostgreSQL to avoid foreign key violations
+	_, err = h.DB.Exec(ctx, `
+		INSERT INTO users (id, email, role, display_name)
+		VALUES ($1, $2, 'teacher', 'Profesor de Prueba')
+		ON CONFLICT (id) DO NOTHING;
+	`, teacherID, teacherIDRaw+"@test.com")
+	if err != nil {
+		http.Error(w, "Database error (seeding user): "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Ensure the course exists in PostgreSQL if specified
+	if courseID != nil {
+		_, err = h.DB.Exec(ctx, `
+			INSERT INTO courses (id, code, name, teacher_id)
+			VALUES ($1, 'TEST101', 'Materia de Prueba', $2)
+			ON CONFLICT (id) DO NOTHING;
+		`, *courseID, teacherID)
+		if err != nil {
+			http.Error(w, "Database error (seeding course): "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+
+	// Create voice profile in DB if not exists
 	var profileID string
 	err = h.DB.QueryRow(ctx, `
 		INSERT INTO teacher_voice_profiles (teacher_id, course_id, status, sample_count_sec)
