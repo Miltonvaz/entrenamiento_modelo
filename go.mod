@@ -1,6 +1,6 @@
 module lexiqa-server
 
-go 1.25.0
+go 1.22.2
 
 require (
 	github.com/jackc/pgpassfile v1.0.0 // indirect
