@@ -39,14 +39,23 @@ func (h *OtaHandler) EnsureUploadDirs() error {
 		return err
 	}
 
-	// Automatically download a tiny valid ONNX model if base_model.onnx is missing
+	// Automatically download the base model if base_model.onnx is missing
 	baseModelPath := filepath.Join(modelDir, "base_model.onnx")
 	if _, err := os.Stat(baseModelPath); os.IsNotExist(err) {
 		log.Println("[OTA] base_model.onnx not found. Downloading the base Zipformer encoder.onnx model from Hugging Face...")
-		modelURL := "https://huggingface.co/csukuangfj/sherpa-onnx-zipformer-es-2023-06-15/resolve/main/encoder.onnx"
+		modelURL := "https://huggingface.co/csukuangfj/sherpa-onnx-streaming-zipformer-es-kroko-2025-08-06/resolve/main/encoder.onnx"
+		
+		req, err := http.NewRequest("GET", modelURL, nil)
+		if err != nil {
+			log.Printf("[OTA] Warning: failed to create download request: %v. Fallback placeholder will be used.", err)
+			return nil
+		}
+		
+		// Set browser user agent to avoid HuggingFace CDN blocking
+		req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 		
 		client := &http.Client{Timeout: 10 * time.Minute}
-		resp, err := client.Get(modelURL)
+		resp, err := client.Do(req)
 		if err != nil {
 			log.Printf("[OTA] Warning: failed to download base model: %v. Fallback placeholder will be used.", err)
 			return nil
