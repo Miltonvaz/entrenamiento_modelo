@@ -347,7 +347,7 @@ func (h *OtaHandler) runMockTrainingPipeline(profileID string, jobID string, tea
 	log.Printf("[PIPELINE] Job %s initialized. Running voice adaptation script with teacher %s audio...", jobID, teacherID)
 	
 	versionTag := "v_" + time.Now().Format("20060102_150405")
-	modelPath := filepath.Join(h.UploadDir, "models", "encoder_"+versionTag+".onnx")
+	modelPath := filepath.Join(h.UploadDir, "models", "voiceprint_"+versionTag+".bin")
 	baseModelPath := filepath.Join(h.UploadDir, "models", "base_model.onnx")
 
 	// Ensure destination directory exists
@@ -430,6 +430,21 @@ func (h *OtaHandler) runMockTrainingPipeline(profileID string, jobID string, tea
 		log.Printf("[PIPELINE] Error committing: %v", err)
 		return
 	}
+
+	// Clean up old model versions to prevent disk space exhaustion
+	go func(newModelPath string) {
+		files, err := filepath.Glob(filepath.Join(h.UploadDir, "models", "voiceprint_v_*.bin"))
+		if err != nil {
+			return
+		}
+		for _, f := range files {
+			if filepath.Clean(f) != filepath.Clean(newModelPath) {
+				if err := os.Remove(f); err == nil {
+					log.Printf("[CLEANUP] Deleted old model version to free space: %s", filepath.Base(f))
+				}
+			}
+		}
+	}(modelPath)
 
 	log.Printf("[PIPELINE] Job %s complete. Published new model version %s for teacher %s (SHA256: %s, Size: %d bytes).", jobID, versionTag, teacherID, realSha256, realSize)
 }

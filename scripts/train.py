@@ -1,45 +1,43 @@
 import sys
 import os
-import wave
-import struct
+import subprocess
+import urllib.request
 import shutil
 
-def extract_simple_voice_features(wav_path):
-    """
-    Extracts simple acoustic features (average amplitude, zero crossing rate, energy)
-    using only native Python libraries (no numpy/scipy required!).
-    """
-    try:
-        with wave.open(wav_path, 'r') as f:
-            n_channels = f.getnchannels()
-            sampwidth = f.getsampwidth()
-            framerate = f.getframerate()
-            n_frames = f.getnframes()
-            
-            content = f.readframes(n_frames)
-            
-            # Unpack audio frames
-            if sampwidth == 2:
-                fmt = f"<{n_frames * n_channels}h"
-                samples = struct.unpack(fmt, content)
-            elif sampwidth == 1:
-                fmt = f"<{n_frames * n_channels}B"
-                samples = struct.unpack(fmt, content)
-                samples = [s - 128 for s in samples]
-            else:
-                samples = []
-            
-            if not samples:
-                return 0.0, 0.0
-            
-            # Simple features: Average Energy and Zero Crossing Rate
-            energy = sum(s*s for s in samples) / len(samples)
-            zcr = sum(1 for i in range(1, len(samples)) if (samples[i] >= 0) != (samples[i-1] >= 0)) / len(samples)
-            
-            return energy, zcr
-    except Exception as e:
-        print(f"Error reading {wav_path}: {e}")
-        return 0.0, 0.0
+# Ensure external dependencies are installed automatically
+try:
+    import numpy as np
+except ImportError:
+    print("[PYTHON] Installing numpy...")
+    subprocess.run([sys.executable, "-m", "pip", "install", "numpy"], check=True)
+    import numpy as np
+
+try:
+    import sherpa_onnx
+except ImportError:
+    print("[PYTHON] Installing sherpa-onnx...")
+    subprocess.run([sys.executable, "-m", "pip", "install", "sherpa-onnx"], check=True)
+    import sherpa_onnx
+
+def download_embedding_model(dest_path):
+    """Downloads the official WeSpeaker model if not present."""
+    url = "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/wespeaker_en_voxceleb_resnet34.onnx"
+    print(f"[PYTHON] Downloading WeSpeaker model from {url}...")
+    os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+    urllib.request.urlretrieve(url, dest_path)
+    print(f"[PYTHON] WeSpeaker model saved to {dest_path}")
+
+def convert_to_wav(input_path, output_path):
+    """Converts audio to mono 16kHz PCM WAV using ffmpeg."""
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", input_path,
+        "-ar", "16000",
+        "-ac", "1",
+        "-c:a", "pcm_s16le",
+        output_path
+    ]
+    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
 
 def main():
     if len(sys.argv) < 4:
@@ -47,50 +45,77 @@ def main():
         sys.exit(1)
         
     upload_dir = sys.argv[1]
-    base_model_path = sys.argv[2]
+    base_model_path = sys.argv[2] # Unused but kept for Go command interface consistency
     output_model_path = sys.argv[3]
     
+    model_dir = os.path.join(upload_dir, "models")
+    embedding_model_path = os.path.join(model_dir, "wespeaker_en_voxceleb_resnet34.onnx")
+    
+    # 1. Download WeSpeaker model if missing
+    if not os.path.exists(embedding_model_path):
+        try:
+            download_embedding_model(embedding_model_path)
+        except Exception as e:
+            print(f"[PYTHON] Error downloading model: {e}")
+            sys.exit(1)
+
+    # 2. Configure SpeakerEmbeddingExtractor
+    config = sherpa_onnx.SpeakerEmbeddingExtractorConfig(
+        model=embedding_model_path,
+        num_threads=1,
+        debug=False
+    )
+    extractor = sherpa_onnx.SpeakerEmbeddingExtractor(config)
+
     samples_dir = os.path.join(upload_dir, "voice_samples")
+    embeddings = []
     
-    print(f"[PYTHON] Starting voice adaptation process...")
-    print(f"[PYTHON] Upload directory: {upload_dir}")
-    print(f"[PYTHON] Voice samples directory: {samples_dir}")
-    print(f"[PYTHON] Base model path: {base_model_path}")
-    print(f"[PYTHON] Output model path: {output_model_path}")
-    
-    # 1. Process all WAV/audio files in the samples directory
-    features = []
+    # 3. Process all voice samples in uploads directory
     if os.path.exists(samples_dir):
-        for file_name in os.listdir(samples_dir):
-            if file_name.endswith('.wav') or file_name.endswith('.m4a'):
-                file_path = os.path.join(samples_dir, file_name)
-                # Note: wave library only reads uncompressed WAV. If M4A, we skip feature extraction 
-                # but log it. In production, ffmpeg would convert it to WAV first.
-                if file_name.endswith('.wav'):
-                    energy, zcr = extract_simple_voice_features(file_path)
-                    print(f"[PYTHON] Processed {file_name}: Energy={energy:.2f}, ZCR={zcr:.4f}")
-                    features.append((energy, zcr))
-                else:
-                    print(f"[PYTHON] Found audio clip {file_name} (M4A format). Ready for training.")
-                    
-    # 2. Copy the base ONNX model to the target output path
-    os.makedirs(os.path.dirname(output_model_path), exist_ok=True)
-    if os.path.exists(base_model_path):
-        print(f"[PYTHON] Creating adapted model from base model...")
-        shutil.copy2(base_model_path, output_model_path)
-    else:
-        print(f"[PYTHON] Base model not found! Creating mock ONNX file...")
-        with open(output_model_path, 'wb') as f:
-            f.write(b"MOCK ONNX BINARY DATA - ADAPTED BY PYTHON TRAINING PIPELINE")
-            
-    # 3. Simulate updating the model header/metadata with the speaker fingerprint
-    # In a real model, we would append the speaker embedding vector to the ONNX model inputs/weights.
-    # Here we append the fingerprint info to the end of the file as metadata.
-    fingerprint_tag = f"\n# SPEAKER_FINGERPRINT_ENERGY={sum(f[0] for f in features)/max(len(features), 1):.2f}"
-    with open(output_model_path, 'ab') as f:
-        f.write(fingerprint_tag.encode('utf-8'))
+        temp_dir = os.path.join(upload_dir, "temp_wav")
+        os.makedirs(temp_dir, exist_ok=True)
         
-    print(f"[PYTHON] Model adaptation complete! Output written to {output_model_path}")
+        for file_name in os.listdir(samples_dir):
+            if file_name.endswith('.m4a') or file_name.endswith('.wav'):
+                file_path = os.path.join(samples_dir, file_name)
+                temp_wav_path = os.path.join(temp_dir, f"{os.path.splitext(file_name)[0]}.wav")
+                
+                try:
+                    # Convert to compliant 16kHz PCM WAV
+                    convert_to_wav(file_path, temp_wav_path)
+                    
+                    # Read WAV and compute embedding
+                    samples, sample_rate = sherpa_onnx.read_wave(temp_wav_path)
+                    stream = extractor.create_stream()
+                    stream.accept_waveform(sample_rate=sample_rate, waveform=samples.astype(np.float32))
+                    stream.input_finished()
+                    
+                    if extractor.is_ready(stream):
+                        embedding = extractor.compute(stream)
+                        embeddings.append(np.array(embedding))
+                        print(f"[PYTHON] Extracted embedding for {file_name}")
+                except Exception as e:
+                    print(f"[PYTHON] Warning: failed to process {file_name}: {e}")
+        
+        # Clean up temporary WAV directory
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+    # 4. Average and normalize vectors (Mean pooling + L2 normalization)
+    if not embeddings:
+        print("[PYTHON] Error: No valid voice samples found. Cannot generate fingerprint.")
+        sys.exit(1)
+        
+    mean_embedding = np.mean(embeddings, axis=0)
+    l2_norm = np.linalg.norm(mean_embedding)
+    if l2_norm > 0:
+        mean_embedding = mean_embedding / l2_norm
+
+    # 5. Save the 1 KB voiceprint vector to output path
+    os.makedirs(os.path.dirname(output_model_path), exist_ok=True)
+    with open(output_model_path, 'wb') as f:
+        f.write(mean_embedding.astype(np.float32).tobytes())
+        
+    print(f"[PYTHON] Voiceprint generated successfully: {output_model_path} (Size: {len(mean_embedding)} floats)")
 
 if __name__ == "__main__":
     main()
