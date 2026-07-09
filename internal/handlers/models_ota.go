@@ -12,6 +12,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"time"
 
@@ -311,27 +312,45 @@ func getFileSHA256AndSize(filePath string) (string, int64, error) {
 }
 
 func (h *OtaHandler) runMockTrainingPipeline(profileID string, jobID string, teacherID string, courseID *string) {
-	log.Printf("[PIPELINE] Job %s initialized. Adjusting lexicon with teacher %s audio...", jobID, teacherID)
-	time.Sleep(10 * time.Second) // Simulate compilation/training delay
-
+	log.Printf("[PIPELINE] Job %s initialized. Running voice adaptation script with teacher %s audio...", jobID, teacherID)
+	
 	versionTag := "v_" + time.Now().Format("20060102_150405")
 	modelPath := filepath.Join(h.UploadDir, "models", "encoder_"+versionTag+".onnx")
+	baseModelPath := filepath.Join(h.UploadDir, "models", "base_model.onnx")
 
 	// Ensure destination directory exists
 	_ = os.MkdirAll(filepath.Dir(modelPath), 0755)
 
-	// If a real base model exists in uploads/models/base_model.onnx, copy it.
-	// Otherwise, fallback to creating a dummy valid ONNX text placeholder.
-	baseModelPath := filepath.Join(h.UploadDir, "models", "base_model.onnx")
-	if _, err := os.Stat(baseModelPath); err == nil {
-		log.Printf("[PIPELINE] Copying real base model %s to %s", baseModelPath, modelPath)
-		if err := copyFile(baseModelPath, modelPath); err != nil {
-			log.Printf("[PIPELINE] Warning: failed to copy base model: %v", err)
-			_ = os.WriteFile(modelPath, []byte("MOCK ONNX BINARY DATA - LEXIQA TEST"), 0644)
+	// Path to the Python training script
+	pythonScript := filepath.Join("scripts", "train.py")
+	scriptRan := false
+
+	if _, err := os.Stat(pythonScript); err == nil {
+		log.Printf("[PIPELINE] Executing Python script: python3 %s %s %s %s", pythonScript, h.UploadDir, baseModelPath, modelPath)
+		cmd := exec.Command("python3", pythonScript, h.UploadDir, baseModelPath, modelPath)
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			log.Printf("[PIPELINE] Python script execution failed: %v, Output: %s", err, string(output))
+		} else {
+			log.Printf("[PIPELINE] Python script completed successfully: %s", string(output))
+			scriptRan = true
 		}
 	} else {
-		log.Printf("[PIPELINE] Base model %s not found. Using fallback text placeholder.", baseModelPath)
-		_ = os.WriteFile(modelPath, []byte("MOCK ONNX BINARY DATA - LEXIQA TEST"), 0644)
+		log.Printf("[PIPELINE] Python script not found at %s. Falling back to native copier.", pythonScript)
+	}
+
+	// Fallback native copier if python script did not run or failed
+	if !scriptRan {
+		if _, err := os.Stat(baseModelPath); err == nil {
+			log.Printf("[PIPELINE] Copying base model %s to %s", baseModelPath, modelPath)
+			if err := copyFile(baseModelPath, modelPath); err != nil {
+				log.Printf("[PIPELINE] Warning: failed to copy base model: %v", err)
+				_ = os.WriteFile(modelPath, []byte("MOCK ONNX BINARY DATA - LEXIQA TEST"), 0644)
+			}
+		} else {
+			log.Printf("[PIPELINE] Base model %s not found. Using fallback text placeholder.", baseModelPath)
+			_ = os.WriteFile(modelPath, []byte("MOCK ONNX BINARY DATA - LEXIQA TEST"), 0644)
+		}
 	}
 
 	// Compute real dynamic SHA256 and size of the output file
