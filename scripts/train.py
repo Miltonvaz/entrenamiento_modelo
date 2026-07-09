@@ -39,6 +39,28 @@ def convert_to_wav(input_path, output_path):
     ]
     subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
 
+def read_wave(filename):
+    """Reads a WAV file and returns float32 samples in the range [-1.0, 1.0]."""
+    import wave
+    with wave.open(filename, 'rb') as f:
+        num_channels = f.getnchannels()
+        sample_width = f.getsampwidth()
+        sample_rate = f.getframerate()
+        num_frames = f.getnframes()
+        data = f.readframes(num_frames)
+        
+        if sample_width == 2:
+            samples = np.frombuffer(data, dtype=np.int16).astype(np.float32) / 32768.0
+        elif sample_width == 1:
+            samples = (np.frombuffer(data, dtype=np.uint8).astype(np.float32) - 128.0) / 128.0
+        else:
+            raise ValueError(f"Unsupported sample width: {sample_width}")
+            
+        if num_channels > 1:
+            samples = samples.reshape(-1, num_channels).mean(axis=1)
+            
+        return samples, sample_rate
+
 def main():
     if len(sys.argv) < 4:
         print("Usage: python train.py <upload_dir> <base_model_path> <output_model_path>")
@@ -65,7 +87,7 @@ def main():
         num_threads=1,
         debug=False
     )
-    extractor = sherpa_onnx.SpeakerEmbeddingExtractor(config)
+    extractor = sherpa_onnx.SpeakerEmbeddingExtractor(config=config)
 
     samples_dir = os.path.join(upload_dir, "voice_samples")
     embeddings = []
@@ -85,7 +107,7 @@ def main():
                     convert_to_wav(file_path, temp_wav_path)
                     
                     # Read WAV and compute embedding
-                    samples, sample_rate = sherpa_onnx.read_wave(temp_wav_path)
+                    samples, sample_rate = read_wave(temp_wav_path)
                     stream = extractor.create_stream()
                     stream.accept_waveform(sample_rate=sample_rate, waveform=samples.astype(np.float32))
                     stream.input_finished()
