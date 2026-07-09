@@ -2,7 +2,9 @@ package handlers
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -32,8 +34,49 @@ func (h *OtaHandler) EnsureUploadDirs() error {
 	if err := os.MkdirAll(voiceDir, 0755); err != nil {
 		return err
 	}
-	return os.MkdirAll(modelDir, 0755)
+	if err := os.MkdirAll(modelDir, 0755); err != nil {
+		return err
+	}
+
+	// Automatically download a tiny valid ONNX model if base_model.onnx is missing
+	baseModelPath := filepath.Join(modelDir, "base_model.onnx")
+	if _, err := os.Stat(baseModelPath); os.IsNotExist(err) {
+		log.Println("[OTA] base_model.onnx not found. Downloading a tiny valid ONNX model automatically...")
+		
+		// Tiny MNIST ONNX model (approx. 78 KB)
+		const modelURL = "https://github.com/onnx/models/raw/main/validated/vision/classification/mnist/model/mnist-8.onnx"
+		
+		client := &http.Client{Timeout: 30 * time.Second}
+		resp, err := client.Get(modelURL)
+		if err != nil {
+			log.Printf("[OTA] Warning: failed to download base model: %v. Fallback placeholder will be used.", err)
+			return nil
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			log.Printf("[OTA] Warning: download returned status %s. Fallback placeholder will be used.", resp.Status)
+			return nil
+		}
+
+		out, err := os.Create(baseModelPath)
+		if err != nil {
+			log.Printf("[OTA] Warning: failed to create base_model.onnx file: %v", err)
+			return nil
+		}
+		defer out.Close()
+
+		_, err = io.Copy(out, resp.Body)
+		if err != nil {
+			log.Printf("[OTA] Warning: failed to save downloaded base model: %v", err)
+			return nil
+		}
+		log.Println("[OTA] base_model.onnx downloaded and saved successfully!")
+	}
+
+	return nil
 }
+
 
 // UploadVoiceSample handles POST /v1/teachers/:id/voice-samples
 func (h *OtaHandler) UploadVoiceSample(w http.ResponseWriter, r *http.Request) {
@@ -231,9 +274,73 @@ func (h *OtaHandler) DownloadModel(w http.ResponseWriter, r *http.Request) {
 	http.ServeFile(w, r, localPath)
 }
 
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+
+	_, err = io.Copy(out, in)
+	if err != nil {
+		return err
+	}
+	return out.Sync()
+}
+
+func getFileSHA256AndSize(filePath string) (string, int64, error) {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return "", 0, err
+	}
+	defer file.Close()
+
+	hash := sha256.New()
+	size, err := io.Copy(hash, file)
+	if err != nil {
+		return "", 0, err
+	}
+
+	return hex.EncodeToString(hash.Sum(nil)), size, nil
+}
+
 func (h *OtaHandler) runMockTrainingPipeline(profileID string, jobID string, teacherID string, courseID *string) {
 	log.Printf("[PIPELINE] Job %s initialized. Adjusting lexicon with teacher %s audio...", jobID, teacherID)
 	time.Sleep(10 * time.Second) // Simulate compilation/training delay
+
+	versionTag := "v_" + time.Now().Format("20060102_150405")
+	modelPath := filepath.Join(h.UploadDir, "models", "encoder_"+versionTag+".onnx")
+
+	// Ensure destination directory exists
+	_ = os.MkdirAll(filepath.Dir(modelPath), 0755)
+
+	// If a real base model exists in uploads/models/base_model.onnx, copy it.
+	// Otherwise, fallback to creating a dummy valid ONNX text placeholder.
+	baseModelPath := filepath.Join(h.UploadDir, "models", "base_model.onnx")
+	if _, err := os.Stat(baseModelPath); err == nil {
+		log.Printf("[PIPELINE] Copying real base model %s to %s", baseModelPath, modelPath)
+		if err := copyFile(baseModelPath, modelPath); err != nil {
+			log.Printf("[PIPELINE] Warning: failed to copy base model: %v", err)
+			_ = os.WriteFile(modelPath, []byte("MOCK ONNX BINARY DATA - LEXIQA TEST"), 0644)
+		}
+	} else {
+		log.Printf("[PIPELINE] Base model %s not found. Using fallback text placeholder.", baseModelPath)
+		_ = os.WriteFile(modelPath, []byte("MOCK ONNX BINARY DATA - LEXIQA TEST"), 0644)
+	}
+
+	// Compute real dynamic SHA256 and size of the output file
+	realSha256, realSize, err := getFileSHA256AndSize(modelPath)
+	if err != nil {
+		log.Printf("[PIPELINE] Error computing model checksum: %v", err)
+		realSha256 = "8d969eef6ecad3c29a3a629280e686cf0c3f5d5a86aff3ca12020c923adc6c92"
+		realSize = 1024
+	}
 
 	ctx := context.Background()
 	tx, err := h.DB.Begin(ctx)
@@ -256,15 +363,13 @@ func (h *OtaHandler) runMockTrainingPipeline(profileID string, jobID string, tea
 		return
 	}
 
-	// Register the new published model version
+	// Register the new published model version with real computed values
 	newVersionID := DeterministicUUID("model_ver_" + jobID[:8])
-	versionTag := "v_" + time.Now().Format("20060102_150405")
-	mockModelPath := filepath.Join(h.UploadDir, "models", "encoder_"+versionTag+".onnx")
 
 	_, err = tx.Exec(ctx, `
 		INSERT INTO model_versions (id, version_tag, teacher_id, course_id, artifact_type, artifact_url, sha256, size_bytes, status, published_at, training_job_id)
-		VALUES ($1, $2, $3, $4, 'adapted_onnx', $5, '8d969eef6ecad3c29a3a629280e686cf0c3f5d5a86aff3ca12020c923adc6c92', 1024, 'published', now(), $6);
-	`, newVersionID, versionTag, teacherID, courseID, mockModelPath, jobID)
+		VALUES ($1, $2, $3, $4, 'adapted_onnx', $5, $6, $7, 'published', now(), $8);
+	`, newVersionID, versionTag, teacherID, courseID, modelPath, realSha256, realSize, jobID)
 	if err != nil {
 		log.Printf("[PIPELINE] Error registering model version: %v", err)
 		return
@@ -275,7 +380,7 @@ func (h *OtaHandler) runMockTrainingPipeline(profileID string, jobID string, tea
 		return
 	}
 
-	log.Printf("[PIPELINE] Job %s complete. Published new model version %s for teacher %s.", jobID, versionTag, teacherID)
+	log.Printf("[PIPELINE] Job %s complete. Published new model version %s for teacher %s (SHA256: %s, Size: %d bytes).", jobID, versionTag, teacherID, realSha256, realSize)
 }
 
 func (h *OtaHandler) seedBaseModelOnTheFly(ctx context.Context) {

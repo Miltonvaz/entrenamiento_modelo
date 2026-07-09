@@ -18,8 +18,8 @@ func main() {
 
 	databaseURL := os.Getenv("DATABASE_URL")
 	if databaseURL == "" {
-		// Fallback for local development
-		databaseURL = "postgres://postgres:postgres@localhost:5432/lexiqa?sslmode=disable"
+		// Fallback database configuration using milton123 credentials
+		databaseURL = "postgres://milton123:milton123@127.0.0.1:5432/lexiqa?sslmode=disable"
 	}
 
 	uploadDir := os.Getenv("UPLOAD_DIR")
