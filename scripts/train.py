@@ -29,6 +29,12 @@ def download_embedding_model(dest_path):
 
 def convert_to_wav(input_path, output_path):
     """Converts audio to mono 16kHz PCM WAV using ffmpeg."""
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    if os.path.exists(output_path):
+        try:
+            os.remove(output_path)
+        except Exception:
+            pass
     cmd = [
         "ffmpeg", "-y",
         "-i", input_path,
